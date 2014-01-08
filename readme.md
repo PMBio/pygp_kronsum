@@ -31,7 +31,7 @@ and do the following:
 * python generate_data.py
 * python runtime.py n (n is the number of samples and we used the values 16,32,64,128,256)
 
-For plotting, use the following commands:
+For plotting the results, use the following commands:
 * python plot_runtime.py 
 * python plot_simulations.py 
 
