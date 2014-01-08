@@ -1,0 +1,96 @@
+import scipy as SP
+import pdb
+import matplotlib.pylab as PLT
+import scipy.optimize as OPT
+import scipy.linalg as LA
+
+import sys
+sys.path.append('../gp')
+import gplvm
+import kronprod_gp
+sys.path.append('../covariance')
+import linear
+sys.path.append('../likelihood')
+import likelihood_base as lik
+sys.path.append('../optimize')
+import optimize_base as opt
+
+import logging as LG
+
+if __name__ == '__main__':
+    #1. simulate data according to model
+    SP.random.seed(1)
+    Kc = 3
+    D = 5 
+    X_c = SP.random.randn(D,Kc)
+    C = SP.dot(X_c,X_c.T)
+    Kr = 2
+    N = 100
+    X_r = SP.random.randn(N,Kr)
+    R = SP.dot(X_r,X_r.T)
+    K = SP.kron(C,R) + 0.5 * SP.eye(N*D)
+    Yvec = SP.random.multivariate_normal(SP.zeros(N*D),K)
+    Y = kronprod_gp.unravel(Yvec,N,D)
+
+    pdb.set_trace()
+
+    # use linear kernels
+    hyperparams = {}    
+    # init X
+    X0_r = SP.random.randn(N,Kr)
+    X0_c = SP.random.randn(D,Kc)
+    hyperparams['X_r'] = X0_r
+    hyperparams['X_c'] = X0_c
+
+    covar_c = linear.LinearCF(n_dimensions=Kc)
+    covar_r = linear.LinearCF(n_dimensions=Kr)
+    hyperparams['covar_r'] = SP.log([1])
+    hyperparams['covar_c'] = SP.log([1])
+
+    # use Gaussian noise
+    likelihood = lik.GaussLikISO()
+    hyperparams['lik'] = SP.log([1])
+
+    kgp = kronprod_gp.KronProdGP(covar_r=covar_r,covar_c=covar_c,likelihood=likelihood)
+    kgp.setData(X_c=X0_c,X_r=X0_r,Y=Y,gplvm_dimensions_c=Kc,gplvm_dimensions_r=Kr)
+    
+    # debugging
+    kgp.setDebugging(True)
+    LG.basicConfig(level=LG.DEBUG)
+    LG.debug('Compute naive updates and compare with Kronecker tricks. Slow!')
+    kgp.LML(hyperparams)
+    kgp.LMLgrad(hyperparams)
+
+    LG.info('running kronecker gplvm')
+    kgp.setDebugging(False)
+    opts = {}
+    opts['gradcheck'] = False
+
+    Ifilter = {'X_c':SP.ones(X0_c.shape),'X_r':SP.ones(X0_r.shape),'covar_c':SP.zeros(1),'covar_r':SP.zeros(1),'lik':SP.ones(1)}
+    [hyperparams_opt, lml_opt] = opt.opt_hyper(kgp,hyperparams,opts=opts,Ifilter=Ifilter)
+
+    LG.debug('Compute naive updates and compare with Kronecker tricks. Slow!')
+    kgp.setDebugging(True)
+    kgp.LML(hyperparams_opt)
+    lmlgrad = kgp.LMLgrad(hyperparams_opt)
+    gradient = SP.array([LA.norm(x) for x in lmlgrad.values()]).mean()
+    LG.debug('Gradient: %.2f'%gradient)
+    
+    K_c = covar_c.K(hyperparams_opt['covar_c'],hyperparams_opt['X_c'])
+    K_r = covar_r.K(hyperparams_opt['covar_r'],hyperparams_opt['X_r'])
+
+    fig = PLT.figure()
+    fig.add_subplot(2,2,1)
+    PLT.title('K_c (Kron-GPLVM)')
+    PLT.imshow(K_c,interpolation='nearest')
+    fig.add_subplot(2,2,2)
+    PLT.title('K_r (Kron-GPLVM)')
+    PLT.imshow(K_r,interpolation='nearest')
+    fig.add_subplot(2,2,3)
+    PLT.title('K_c (True)')
+    PLT.imshow(C,interpolation='nearest')
+    fig.add_subplot(2,2,4)
+    PLT.title('K_r (True)')
+    PLT.imshow(R,interpolation='nearest')
+
+    pdb.set_trace()

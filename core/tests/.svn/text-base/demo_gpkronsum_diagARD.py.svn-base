@@ -1,0 +1,102 @@
+import scipy as SP
+import pdb
+import matplotlib.pylab as PLT
+
+import sys
+sys.path.append('../gp')
+import gplvm
+import kronsum_gp,kronprod_gp
+sys.path.append('../covariance')
+import linear, fixed,diag
+sys.path.append('../likelihood')
+import likelihood_base as lik
+sys.path.append('../optimize')
+import optimize_base as opt
+
+import logging as LG
+
+sys.path.append('../experiments')
+
+from sim_data import sim_linear_kernel,sim_pheno
+
+if __name__ == '__main__':
+    #1. simulate data according to model
+    N = 100 # number of samples
+    D = 3 # number of phenotypes
+    Kc = 2
+    C,X_c = sim_linear_kernel(N=D,n_dim=Kc) # genetic correlation
+    Kr = 3
+    R,X_r = sim_linear_kernel(N=N,n_dim=Kr) # Kpop
+
+    Ksigma = 0
+    X_sigma = SP.zeros((D,0))
+    Sigma = SP.diag(SP.random.randn(D)**2)
+  
+    Omega = SP.eye(N) # iid-noise
+    #K = SP.kron(C,R) + SP.kron(Sigma,Omega)
+    Yvec = sim_pheno(C,R,Sigma,Omega)
+    Y = kronprod_gp.unravel(Yvec,N,D)
+    Komega = 0
+    X_omega = SP.zeros((N,Komega))
+    
+    # use linear kernels
+    # R, Omega are fixed
+    # C, Sigma need to be learnt
+    covar_r = linear.LinearCF(n_dimensions=Kr)
+    covar_omega = fixed.FixedCF(Omega,n_dimensions=Komega)
+    covar_c = linear.LinearCF(n_dimensions=Kc)
+    covar_sigma = diag.DiagArdCF(n_dimensions=Ksigma)
+
+    kgp = kronsum_gp.KronSumGP(covar_r=covar_r,covar_c=covar_c,covar_sigma=covar_sigma,covar_omega=covar_omega,likelihood=None)
+
+    # init X
+    X0_c = SP.random.randn(D,Kc)
+ 
+    kgp.setData(X_r=X_r,X_c=X0_c,X_sigma=X_sigma,X_omega=X_omega,Y=Y,gplvm_dimensions_sigma=Ksigma,gplvm_dimensions_c=Kc)
+
+    # init hyperparams
+    hyperparams = {}    
+    hyperparams['X_c'] = X0_c
+    hyperparams['covar_c'] = SP.log([0.5])
+    hyperparams['covar_r'] = SP.log([0.5])
+    hyperparams['covar_sigma'] = SP.log(SP.repeat(0.5,D))
+    hyperparams['covar_omega'] = SP.log([0.5])
+
+    pdb.set_trace()
+    
+    # debugging
+    kgp.setDebugging(True)
+    LG.basicConfig(level=LG.DEBUG)
+    LG.debug('Compute naive updates and compare with Kronecker tricks. Slow!')
+    kgp.LML(hyperparams)
+    kgp.LMLgrad(hyperparams)
+
+    LG.info('running kronecker gplvm')
+    kgp.setDebugging(False)
+    opts = {}
+    opts['gradcheck'] = False
+    [hyperparams_opt, lml_opt] = opt.opt_hyper(kgp,hyperparams,opts=opts)
+
+    if 1:
+        LG.debug('Compute naive updates and compare with Kronecker tricks. Slow!')
+        kgp.setDebugging(True)
+        kgp.LML(hyperparams_opt)
+        kgp.LMLgrad(hyperparams_opt)
+
+    K_c = covar_c.K(hyperparams_opt['covar_c'],hyperparams_opt['X_c'])
+    K_sigma = covar_sigma.K(hyperparams_opt['covar_sigma'],X_sigma)
+    
+    fig = PLT.figure()
+    fig.add_subplot(2,2,1)
+    PLT.title('K_c (Kron-GPLVM)')
+    PLT.imshow(K_c,interpolation='nearest')
+    fig.add_subplot(2,2,2)
+    PLT.title('K_sigma (Kron-GPLVM)')
+    PLT.imshow(K_sigma,interpolation='nearest')
+    fig.add_subplot(2,2,3)
+    PLT.title('K_c (True)')
+    PLT.imshow(C,interpolation='nearest')
+    fig.add_subplot(2,2,4)
+    PLT.title('K_sigma (True)')
+    PLT.imshow(Sigma,interpolation='nearest')
+    pdb.set_trace()

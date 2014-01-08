@@ -1,0 +1,78 @@
+import scipy as SP
+import pdb
+import matplotlib.pylab as PLT
+
+import sys
+sys.path.append('../gp')
+import gplvm
+import kronsum_gp,kronprod_gp,kronsum_gp_naive
+sys.path.append('../covariance')
+import linear, fixed
+sys.path.append('../likelihood')
+import likelihood_base as lik
+sys.path.append('../optimize')
+import optimize_base as opt
+
+import logging as LG
+
+sys.path.append('../experiments')
+
+from sim_data import sim_linear_kernel,sim_pheno
+
+if __name__ == '__main__':
+    SP.random.seed(1)
+    
+    #1. simulate data according to model
+    N = 100 # number of samples
+    D = 3 # number of phenotypes
+    Kc = 2
+    C,X_c = sim_linear_kernel(N=D,n_dim=Kc) # genetic correlation
+    Kr = 3
+    R,X_r = sim_linear_kernel(N=N,n_dim=Kr) # Kpop
+    Ksigma = 2
+    Sigma,X_sigma = sim_linear_kernel(N=D,n_dim=Ksigma) # noise correlation
+    Omega = SP.eye(N) # iid-noise
+    #K = SP.kron(C,R) + SP.kron(Sigma,Omega)
+    Yvec = sim_pheno(C,R,Sigma,Omega)
+    Y = kronprod_gp.unravel(Yvec,N,D)
+    Komega = 0
+    X_omega = SP.zeros((N,Komega))
+    #pdb.set_trace()
+    
+    # use linear kernels
+    # R, Omega are fixed
+    # C, Sigma need to be learnt
+    covar_r = linear.LinearCF(n_dimensions=Kr)
+    covar_omega = fixed.FixedCF(Omega,n_dimensions=Komega)
+    covar_c = linear.LinearCF(n_dimensions=Kc)
+    covar_sigma = linear.LinearCF(n_dimensions=Ksigma)
+
+    # init X
+    X0_c = SP.random.randn(D,Kc)
+    X0_sigma = SP.random.randn(D,Ksigma)
+
+    # init hyperparams
+    hyperparams = {}    
+    hyperparams['X_sigma'] = X0_sigma
+    hyperparams['X_c'] = X0_c
+    hyperparams['covar_c'] = SP.log([1])
+    hyperparams['covar_r'] = SP.log([1])
+    hyperparams['covar_sigma'] = SP.log([1])
+    hyperparams['covar_omega'] = SP.log([1])
+
+    Ifilter = {'X_sigma':SP.ones(X0_sigma.shape),'X_c':SP.ones(X0_c.shape),'covar_sigma':SP.zeros(1),'covar_r':SP.ones(1),'lik':SP.ones(1),'covar_c':SP.zeros(1),'covar_omega':SP.zeros(1)}
+    #Ifilter = None
+    opts = []
+    
+    kgp = kronsum_gp.KronSumGP(covar_r=covar_r,covar_c=covar_c,covar_sigma=covar_sigma,covar_omega=covar_omega,likelihood=None)
+    kgp.setData(X_r=X_r,X_c=X0_c,X_sigma=X0_sigma,X_omega=X_omega,Y=Y,gplvm_dimensions_sigma=Ksigma,gplvm_dimensions_c=Kc)  
+    [hyperparams_opt, lml_fast] = opt.opt_hyper(kgp,hyperparams,opts=opts,Ifilter=Ifilter)
+    
+
+    kgp = kronsum_gp_naive.KronSumGP(covar_r=covar_r,covar_c=covar_c,covar_sigma=covar_sigma,covar_omega=covar_omega,likelihood=None)
+    kgp.setData(X_r=X_r,X_c=X0_c,X_sigma=X0_sigma,X_omega=X_omega,Y=Y,gplvm_dimensions_sigma=Ksigma,gplvm_dimensions_c=Kc)
+    kgp.setDebugging(True)
+    [hyperparams_opt, lml_slow] = opt.opt_hyper(kgp,hyperparams,opts=opts,Ifilter=Ifilter)
+
+    print 'LML(fast)=%.2f'%lml_fast
+    print 'LML(slow)=%.2f'%lml_slow

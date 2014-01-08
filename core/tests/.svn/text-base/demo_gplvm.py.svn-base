@@ -1,0 +1,81 @@
+import scipy as SP
+import pdb
+import matplotlib.pylab as PLT
+
+import sys
+sys.path.append('../gp')
+import gplvm
+sys.path.append('../covariance')
+import linear
+sys.path.append('../likelihood')
+import likelihood_base as lik
+sys.path.append('../optimize')
+import optimize_base as opt
+
+import logging as LG
+
+if __name__ == '__main__':
+    LG.basicConfig(level=LG.DEBUG)
+
+    # simulate data
+    # Y = WX + noise
+    N = 20 # number of phenotypes
+    D = 100 # number of samples
+    K =  5 # number of latent factors
+    SP.random.seed(1)
+    S = SP.random.randn(N,K)
+    W = SP.random.randn(D,K)
+    Y = SP.dot(W,S.T).T
+    Y += SP.random.randn(N,D)
+
+    # use standard PCA
+    S_PCA,W_PCA = gplvm.PCA(Y,K)
+    Y_PCA = SP.dot(S_PCA,W_PCA.T)
+
+    # GPLVM
+    # use linear kernel
+    covariance = linear.LinearCF(n_dimensions=K)
+    hyperparams = {'covar': SP.log([1])}
+
+    # init X
+    X0 = S_PCA
+    hyperparams['X'] = X0
+    
+    # use Gaussian noise
+    likelihood = lik.GaussLikISO()
+    hyperparams['lik'] = SP.log([0.1])
+
+    # int GPLVM
+    g = gplvm.GPLVM(covar_func=covariance,likelihood=likelihood)
+    g.setData(X=X0,Y=Y,gplvm_dimensions=SP.arange(X0.shape[1]))
+    g.setDebugging(True)
+    print 'running standard gplvm'
+    opts = {}
+    opts['gradcheck'] = False
+
+    Ifilter = None
+    Ifilter = {'X':SP.ones(X0.shape),'lik':SP.ones(1),'covar':SP.zeros(1)}
+               
+    [hyperparams_opt, lml_opt] = opt.opt_hyper(g,hyperparams,opts=opts,Ifilter=Ifilter)
+    LG.info('LML: %.2f'%lml_opt)
+    
+    # plot
+    fig = PLT.figure(figsize=(18,4.5))
+    fig.add_subplot(141)
+    PLT.title('cov(Y)')
+    PLT.imshow(SP.cov(Y),interpolation='nearest')
+    fig.add_subplot(142)
+    PLT.title('True Matrix')
+    SS = SP.dot(S,S.T)
+    PLT.imshow(SS,interpolation='nearest')
+    fig.add_subplot(143)
+    PLT.title('PCA Estimator')
+    SS = SP.dot(S_PCA,S_PCA.T)
+    PLT.imshow(SS,interpolation='nearest')
+    fig.add_subplot(144)
+    PLT.title('GPLVM Estimator')
+    K = covariance.K(hyperparams['covar'],hyperparams['X'])
+    PLT.imshow(K,interpolation='nearest')
+
+    
+    pdb.set_trace()

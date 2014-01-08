@@ -1,0 +1,602 @@
+import pdb
+import logging as LG
+import scipy as SP
+import scipy.linalg as LA
+import copy
+import sys
+
+from gp_base import GP
+from gplvm import GPLVM
+from kronprod_gp import ravel,unravel
+sys.path.append('../likelihood')
+import likelihood_base
+sys.path.append('../linalg')
+from linalg_matrix import jitChol
+sys.path.append('../covariance')
+import linear,fixed
+
+    
+class KronSumGP(GPLVM):
+    """GPLVM for kronecker type covariance structures
+    This class assumes the following model structure
+    vec(Y) ~ GP(0, C \otimes R + Sigma \otimes Omega)
+    """
+
+    __slots__ = ['gplvm_dimensions_r','gplvm_dimensions_c','gplvm_dimensions_sigma','gplvm_dimensions_omega',
+                 'X_c','X_r','X_omega','X_sigma','covar_c','covar_r','covar_omega','covar_sigma']
+    
+    def __init__(self,covar_r=None,covar_c=None,covar_omega=None,covar_sigma=None,likelihood=None):
+        assert likelihood==None, 'likelihood is not implemented yet'
+        self.covar_r = covar_r
+        self.covar_c = covar_c
+        self.covar_sigma = covar_sigma
+        self.covar_omega = covar_omega
+        self.likelihood = likelihood
+        self._covar_cache = None
+
+        self.X_c = None
+        self.X_r = None
+        self.X_sigma = None
+        self.Y = None
+        self.X_omega = None
+
+        self.gplvm_dimensions_c = None
+        self.gplvm_dimensions_r = None
+        self.gplvm_dimensions_sigma = None
+        self.gplvm_dimensions_omega = None
+        
+        self.debugging = False
+
+    def setCovarOmega(self,covar_omega):
+        self.covar_omega = covar_omega
+
+    def setData(self,X_c=None,X_r=None,X_omega=None,X_sigma=None,Y=None,gplvm_dimensions_c=None,gplvm_dimensions_r=None,gplvm_dimensions_omega=None,gplvm_dimensions_sigma=None):
+        if Y!=None:
+            self.Y = Y
+            self.n = Y.shape[0]
+            self.t = Y.shape[1]
+            self.nt = Y.shape[0]*Y.shape[1]
+
+        if X_c != None:
+            self.X_c = X_c
+        if X_r != None:
+            self.X_r = X_r
+        if X_sigma != None:
+            self.X_sigma = X_sigma
+        if X_omega != None:
+            self.X_omega = X_omega
+
+        if  gplvm_dimensions_c!=None:
+            self.gplvm_dimensions_c = gplvm_dimensions_c
+        if  gplvm_dimensions_r!=None:
+            self.gplvm_dimensions_r = gplvm_dimensions_r
+        if  gplvm_dimensions_omega!=None:
+            self.gplvm_dimensions_omega = gplvm_dimensions_omega
+        if  gplvm_dimensions_sigma!=None:
+            self.gplvm_dimensions_sigma = gplvm_dimensions_sigma
+        
+        if self.X_r!=None and self.Y!=None:
+            assert self.Y.shape[0]==self.X_r.shape[0], 'dimensions do not match'
+        if self.X_c!=None and self.Y!=None:
+            assert self.Y.shape[1]==self.X_c.shape[0], 'dimensions do not match'
+        if self.X_omega!=None and self.Y!=None:
+            assert self.Y.shape[0]==self.X_omega.shape[0], 'dimensions do not match'
+        if self.X_sigma!=None and self.Y!=None:
+            assert self.Y.shape[1]==self.X_sigma.shape[0], 'dimensions do not match'
+
+        if self.gplvm_dimensions_c!=None and self.X_c!=None:
+            assert self.gplvm_dimensions_c==self.X_c.shape[1], 'dimensions do not match'
+        if self.gplvm_dimensions_r!=None and self.X_r!=None:
+            assert self.gplvm_dimensions_r==self.X_r.shape[1], 'dimensions do not match'
+        if self.gplvm_dimensions_sigma!=None and self.X_sigma!=None:
+            assert self.gplvm_dimensions_sigma==self.X_sigma.shape[1], 'dimensions do not match'
+        if self.gplvm_dimensions_omega!=None and self.X_omega!=None:
+            assert self.gplvm_dimensions_omega==self.X_omega.shape[1], 'dimensions do not match'
+            
+        self._invalidate_cache()
+
+    def _update_inputs(self,hyperparams):
+        """ update the inputs from gplvm model """
+        if 'X_c' in hyperparams.keys():
+            self.X_c = hyperparams['X_c']
+        if 'X_r' in hyperparams.keys():
+            self.X_r = hyperparams['X_r']
+        if 'X_sigma' in hyperparams.keys():
+            self.X_sigma = hyperparams['X_sigma']
+        if 'X_omega' in hyperparams.keys():
+            self.X_omega = hyperparams['X_omega']
+            
+
+    def _update_evd(self,hyperparams,covar_id):
+        keys = []
+        if 'covar_%s'%covar_id in hyperparams:
+            keys.append('covar_%s'%covar_id)
+        if 'X_%s'%covar_id in hyperparams:
+            keys.append('X_%s'%covar_id)
+ 
+        if not(self._is_cached(hyperparams,keys=keys)):
+            K = getattr(self,'covar_%s'%covar_id).K(hyperparams['covar_%s'%covar_id],getattr(self,'X_%s'%covar_id))
+            S,U = LA.eigh(K)
+            self._covar_cache['K_%s'%covar_id] = K
+            self._covar_cache['U_%s'%covar_id] = U
+            self._covar_cache['S_%s'%covar_id] = S
+
+    def predict(self,hyperparams,Xstar_c,Xstar_r):
+        """
+        predict on Xstar
+        """
+        self._update_inputs(hyperparams)
+        KV = self.get_covariances(hyperparams)
+
+        Kstar_r = self.covar_r.K(hyperparams['covar_r'],self.X_r,Xstar_r)
+        Kstar_c = self.covar_c.K(hyperparams['covar_c'],self.X_c,Xstar_c)
+        S = SP.kron(KV['Stilde_c'],KV['Stilde_r'])+1
+        USUc = SP.dot(SP.sqrt(1./KV['S_sigma']) * KV['U_sigma'],KV['Utilde_c'])
+        USUr = SP.dot(SP.sqrt(1./KV['S_omega']) * KV['U_omega'],KV['Utilde_r'])
+        KinvY = SP.dot(USUr,SP.dot(unravel(ravel(KV['Ytilde_rc']) * 1./S,self.n,self.t),USUc.T))
+        Ystar = SP.dot(Kstar_r.T,SP.dot(KinvY,Kstar_c))
+        Ystar = unravel(Ystar,Xstar_r.shape[0],self.t)
+
+        if self.debugging:
+            Kstar = SP.kron(Kstar_c,Kstar_r)
+            Ynaive = SP.dot(Kstar.T,KV['alpha'])
+            Ynaive = unravel(Ynaive,Xstar_r.shape[0],self.t)
+            assert SP.allclose(Ystar,Ynaive), 'ouch, prediction does not work out'
+        return Ystar
+    
+    def get_covariances(self,hyperparams):
+        """
+        INPUT:
+        hyperparams:  dictionary
+        OUTPUT: dictionary with the fields
+        Kr:     kernel on rows
+        Kc:     kernel on columns
+        Knoise: noise kernel
+        """
+        if self._is_cached(hyperparams):
+            return self._covar_cache
+        if self._covar_cache==None:
+            self._covar_cache = {}
+
+        # get EVD of C
+        self._update_evd(hyperparams,'c')
+        self._update_evd(hyperparams,'r')
+        self._update_evd(hyperparams,'sigma')
+        self._update_evd(hyperparams,'omega')
+
+        # create short-cut
+        KV = self._covar_cache
+     
+        USi_c = SP.sqrt(1./KV['S_c']) * KV['U_c']
+        USi_r = SP.sqrt(1./KV['S_r']) * KV['U_r']
+        USi_omega = SP.sqrt(1./KV['S_omega']) * KV['U_omega']
+        USi_sigma = SP.sqrt(1./KV['S_sigma']) * KV['U_sigma']
+
+        # do only recompute if hyperparameters of K_c,K_sigma change
+        keys = list(set(hyperparams.keys()) & set(['covar_c','covar_sigma','X_c','X_sigma']))
+        if not(self._is_cached(hyperparams,keys=keys)):
+        #if 1:
+            Ktilde_c = SP.dot(USi_sigma.T,SP.dot(KV['K_c'],USi_sigma))
+            Stilde_c,Utilde_c = LA.eigh(Ktilde_c)
+            Ktilde_sigma = SP.dot(USi_c.T,SP.dot(KV['K_sigma'],USi_c))
+            Stilde_sigma,Utilde_sigma = LA.eigh(Ktilde_sigma)
+            KV['Ktilde_c'] = Ktilde_c
+            KV['Utilde_c'] = Utilde_c
+            KV['Stilde_c'] = Stilde_c
+            KV['Ktilde_sigma'] = Ktilde_sigma
+            KV['Utilde_sigma'] = Utilde_sigma
+            KV['Stilde_sigma'] = Stilde_sigma
+
+            # needed later...
+            KV['UcScIUtildeSigma'] =  SP.dot(SP.sqrt(1./KV['S_c']) * KV['U_c'],KV['Utilde_sigma'])
+            KV['USUsigmaUSU'] = SP.dot(KV['UcScIUtildeSigma'].T,SP.dot(KV['K_sigma'],KV['UcScIUtildeSigma']))
+
+            KV['UsigmaSsigmaIUtildeC'] =  SP.dot(SP.sqrt(1./KV['S_sigma']) * KV['U_sigma'],KV['Utilde_c'])
+            KV['USUCUSU'] = SP.dot(KV['UsigmaSsigmaIUtildeC'].T,SP.dot(KV['K_c'],KV['UsigmaSsigmaIUtildeC']))
+
+        # do only recompute if hyperparameters of K_r,K_omega change
+        keys = list(set(hyperparams.keys()) & set(['covar_r','covar_omega','X_r','X_omega']))
+        if not(self._is_cached(hyperparams,keys=keys)):
+            #if 1:
+            Ktilde_r = SP.dot(USi_omega.T,SP.dot(KV['K_r'],USi_omega))
+            Stilde_r,Utilde_r = LA.eigh(Ktilde_r)
+            Ktilde_omega = SP.dot(USi_r.T,SP.dot(KV['K_omega'],USi_r))
+            Stilde_omega,Utilde_omega = LA.eigh(Ktilde_omega)
+            KV['Ktilde_r'] = Ktilde_r
+            KV['Utilde_r'] = Utilde_r
+            KV['Stilde_r'] = Stilde_r
+            KV['Ktilde_omega'] = Ktilde_omega
+            KV['Utilde_omega'] = Utilde_omega
+            KV['Stilde_omega'] = Stilde_omega
+
+            # needed later...
+            KV['UrSrIUtildeOmega'] =  SP.dot(SP.sqrt(1./KV['S_r']) * KV['U_r'],KV['Utilde_omega'])
+            KV['USUomegaUSU'] = SP.dot(KV['UrSrIUtildeOmega'].T,SP.dot(KV['K_omega'],KV['UrSrIUtildeOmega']))
+            KV['UomegaSomegaIUtildeR'] = SP.dot(SP.sqrt(1./KV['S_omega']) * KV['U_omega'],KV['Utilde_r'])
+            KV['USURUSU'] = SP.dot(KV['UomegaSomegaIUtildeR'].T,SP.dot(KV['K_r'],KV['UomegaSomegaIUtildeR']))
+            
+
+        # evaluate Ytilde
+        # Sigma,Omega is projected away
+        KV['Ytilde_rc'] = SP.dot(KV['Utilde_r'].T,SP.dot(USi_omega.T,SP.dot(self.Y,SP.dot(USi_sigma,KV['Utilde_c']))))
+        # C,R is projected away
+        KV['Ytilde_os'] = SP.dot(KV['Utilde_omega'].T,SP.dot(USi_r.T,SP.dot(self.Y,SP.dot(USi_c,KV['Utilde_sigma']))))
+
+
+        if self.debugging:
+            # needed later
+            Yvec = ravel(self.Y)
+            K = SP.kron(KV['K_c'],KV['K_r']) + SP.kron(KV['K_sigma'],KV['K_omega'])
+            L = jitChol(K)[0].T # lower triangular
+            alpha = LA.cho_solve((L,True),Yvec)
+            alpha2D = SP.reshape(alpha,(self.nt,1))
+            Kinv = LA.cho_solve((L,True),SP.eye(self.nt))
+            W = Kinv - SP.dot(alpha2D,alpha2D.T)
+            KV['Yvec'] = Yvec
+            KV['K'] = K
+            KV['Kinv'] = Kinv
+            KV['L'] = L
+            KV['alpha'] = alpha
+            KV['W'] = W
+            
+        KV['hyperparams'] = copy.deepcopy(hyperparams)
+        return KV
+        
+
+    def _LML_covar(self,hyperparams):
+        """
+        log marginal likelihood
+        """
+        self._update_inputs(hyperparams)
+        
+        try:
+            KV = self.get_covariances(hyperparams)
+        except LA.LinAlgError:
+            LG.error('linalg exception in _LML_covar')
+            return 1E6
+      
+        
+        S = SP.kron(KV['Stilde_c'],KV['Stilde_r'])+1
+        lml_quad = 0.5*(ravel(KV['Ytilde_rc'])**2 * 1./S).sum()
+        lml_det = 0.5*(SP.log(KV['S_sigma']).sum()*self.n + SP.log(KV['S_omega']).sum()*self.t)
+        lml_det+= 0.5*SP.log(S).sum()
+        lml_const = 0.5*self.n*self.t*(SP.log(2*SP.pi))
+        
+        if self.debugging:
+            # do calculation without kronecker tricks and compare
+            _lml_quad = 0.5 * (KV['alpha']*KV['Yvec']).sum()
+            _lml_det =  SP.log(SP.diag(KV['L'])).sum()
+            assert SP.allclose(_lml_quad,lml_quad,atol=1E-2,rtol=1E-2),  'ouch, quadratic form is wrong: %.2f'%LA.norm(lml_quad,_lml_quad)
+            assert SP.allclose(_lml_det, lml_det,atol=1E-2,rtol=1E-2), 'ouch, ldet is wrong in _LML_covar'%LA.norm(lml_det,_lml_det)
+        
+        lml = lml_quad + lml_det + lml_const
+
+        return lml
+        
+    def _LMLgrad_covar(self,hyperparams):
+        """
+        evaluates the gradient of the log marginal likelihood with respect to the
+        hyperparameters of the covariance function
+        """
+        self._update_inputs(hyperparams)
+        RV = {}
+        if 'covar_r' in hyperparams:
+            RV.update(self._LMLgrad_covar_r(hyperparams))
+
+        if 'covar_c' in hyperparams:
+            RV.update(self._LMLgrad_covar_c(hyperparams))
+            
+        if 'covar_sigma' in hyperparams:
+            RV.update(self._LMLgrad_covar_sigma(hyperparams))
+                
+        if 'covar_omega' in hyperparams:
+            RV.update(self._LMLgrad_covar_omega(hyperparams))
+            
+        return RV
+
+    def _LMLgrad_x(self,hyperparams):
+        """
+        evaluates the gradient of the log marginal likelihood with respect to
+        the latent factors
+        """
+        RV = {}
+        if 'X_r' in hyperparams:
+            RV.update(self._LMLgrad_x_r(hyperparams))
+
+        if 'X_c' in hyperparams:
+            RV.update(self._LMLgrad_x_c(hyperparams))
+
+        if 'X_sigma' in hyperparams:
+            RV.update(self._LMLgrad_x_sigma(hyperparams))
+
+        if 'X_omega' in hyperparams:
+            RV.update(self._LMLgrad_x_omega(hyperparams))
+            
+        return RV
+
+
+    def _LMLgrad_x_r(self,hyperparams):
+        try:
+            KV = self.get_covariances(hyperparams)
+        except LA.LinAlgError:
+            LG.error('linalg exception in _LMLgrad_x_r')
+            return {'X_r':SP.zeros(hyperparams['X_r'].shape)}
+
+        LMLgrad = SP.zeros((self.n,self.gplvm_dimensions_r))
+        LMLgrad_det = SP.zeros((self.n,self.gplvm_dimensions_r))
+        LMLgrad_quad = SP.zeros((self.n,self.gplvm_dimensions_r))
+
+        S = SP.kron(KV['Stilde_c'],KV['Stilde_r'])+1
+        USU = SP.dot(SP.sqrt(1./KV['S_sigma']) * KV['U_sigma'],KV['Utilde_c'])
+        USUCUSU = SP.dot(USU.T,SP.dot(KV['K_c'],USU))
+        USU = SP.dot(SP.sqrt(1./KV['S_omega']) * KV['U_omega'],KV['Utilde_r'])
+        SS = SP.dot(unravel(1./S,self.n,self.t),SP.diag(USUCUSU))
+        SiYtilde = (1./S) * ravel(KV['Ytilde_rc'])
+        USUSiYtilde = SP.dot(USU,unravel(SiYtilde,self.n,self.t))
+        tmp = SP.dot(USUSiYtilde,SP.dot(USUCUSU,USUSiYtilde.T))
+
+        for d in xrange(self.gplvm_dimensions_r):
+            Kd_grad = self.covar_r.Kgrad_x(hyperparams['covar_r'],self.X_r,None,d)
+            # calculate gradient of logdet
+            URU = SP.dot(Kd_grad.T,USU)*USU
+            LMLgrad_det[:,d] = 2*SP.dot(URU,SS.T)
+            # calculate gradient of squared form
+            LMLgrad_quad[:,d] = -2*(tmp*Kd_grad).sum(0)
+
+        LMLgrad = 0.5*(LMLgrad_det + LMLgrad_quad)
+
+        if self.debugging:
+            _LMLgrad = SP.zeros((self.n,self.gplvm_dimensions_r))
+            for n in xrange(self.n):
+                for d in xrange(self.gplvm_dimensions_r):
+                    Kgrad_x = self.covar_r.Kgrad_x(hyperparams['covar_r'],self.X_r,n,d)
+                    Kgrad_x = SP.kron(KV['K_c'],Kgrad_x)
+                    _LMLgrad[n,d] = 0.5*(KV['W']*Kgrad_x).sum()
+            assert SP.allclose(LMLgrad,_LMLgrad,rtol=1E-3,atol=1E-2), 'ouch, something is wrong: %.2f'%LA.norm(LMLgrad-_LMLgrad)
+
+        return {'X_r': LMLgrad}
+
+    def _LMLgrad_x_c(self,hyperparams):
+        try:
+            KV = self.get_covariances(hyperparams)
+        except LA.LinAlgError:
+            LG.error('linalg exception in _LMLgrad_x_c')
+            return {'X_c':SP.zeros(hyperparams['X_c'].shape)}
+
+
+        LMLgrad = SP.zeros((self.t,self.gplvm_dimensions_c))
+        LMLgrad_det = SP.zeros((self.t,self.gplvm_dimensions_c))
+        LMLgrad_quad = SP.zeros((self.t,self.gplvm_dimensions_c))
+
+        S = SP.kron(KV['Stilde_c'],KV['Stilde_r'])+1
+        #USU = SP.dot(SP.sqrt(1./KV['S_omega']) * KV['U_omega'],KV['Utilde_r'])
+        #USURUSU = SP.dot(USU.T,SP.dot(KV['K_r'],USU))
+        #USU = SP.dot(SP.sqrt(1./KV['S_sigma']) * KV['U_sigma'],KV['Utilde_c'])
+        SS = SP.dot(SP.diag(KV['USURUSU'].T),unravel(1./S,self.n,self.t))
+        SiYtilde = (1./S) * ravel(KV['Ytilde_rc'])
+        USUSiYtilde = SP.dot(KV['UsigmaSsigmaIUtildeC'],unravel(SiYtilde,self.n,self.t).T)
+        tmp = SP.dot(USUSiYtilde,SP.dot(KV['USURUSU'],USUSiYtilde.T))
+
+        for d in xrange(self.gplvm_dimensions_c):
+            Kd_grad = self.covar_c.Kgrad_x(hyperparams['covar_c'],self.X_c,None,d)
+            # calculate gradient of logdet
+            URU = SP.dot(Kd_grad.T,KV['UsigmaSsigmaIUtildeC'])*KV['UsigmaSsigmaIUtildeC']
+            LMLgrad_det[:,d] = 2*SP.dot(URU,SS.T)
+            # calculate gradient of squared form
+            LMLgrad_quad[:,d] = -2*(tmp*Kd_grad).sum(0)
+
+        LMLgrad = 0.5*(LMLgrad_det + LMLgrad_quad)
+
+        if self.debugging:
+            _LMLgrad = SP.zeros((self.t,self.gplvm_dimensions_c))
+            for t in xrange(self.t):
+                for d in xrange(self.gplvm_dimensions_c):
+                    Kgrad_x = self.covar_c.Kgrad_x(hyperparams['covar_c'],self.X_c,t,d)
+                    Kgrad_x = SP.kron(Kgrad_x,KV['K_r'])
+                    _LMLgrad[t,d] = 0.5*(KV['W']*Kgrad_x).sum()
+
+            assert SP.allclose(LMLgrad,_LMLgrad,rtol=1E-3,atol=1E-2), 'ouch, something is wrong: %.2f'%LA.norm(LMLgrad-_LMLgrad)
+
+        return {'X_c': LMLgrad}
+
+    def _LMLgrad_x_sigma(self,hyperparams):
+        try:
+            KV = self.get_covariances(hyperparams)
+        except LA.LinAlgError:
+            LG.error('linalg exception in _LMLgrad_x_sigma')
+            return {'X_sigma':SP.zeros(hyperparams['X_sigma'].shape)}
+
+        LMLgrad = SP.zeros((self.t,self.gplvm_dimensions_sigma))
+        LMLgrad_det = SP.zeros((self.t,self.gplvm_dimensions_sigma))
+        LMLgrad_quad = SP.zeros((self.t,self.gplvm_dimensions_sigma))
+
+        S = SP.kron(KV['Stilde_sigma'],KV['Stilde_omega'])+1
+        SS = SP.dot(SP.diag(KV['USUomegaUSU'].T),unravel(1./S,self.n,self.t))
+        SiYtilde = (1./S) * ravel(KV['Ytilde_os'])
+        USUSiYtilde = SP.dot( KV['UcScIUtildeSigma'],unravel(SiYtilde,self.n,self.t).T)
+        tmp = SP.dot(USUSiYtilde,SP.dot(KV['USUomegaUSU'],USUSiYtilde.T))
+
+        for d in xrange(self.gplvm_dimensions_sigma):
+            Kd_grad = self.covar_sigma.Kgrad_x(hyperparams['covar_sigma'],self.X_sigma,None,d)
+            # calculate gradient of logdet
+            URU = SP.dot(Kd_grad.T, KV['UcScIUtildeSigma'])* KV['UcScIUtildeSigma']
+            LMLgrad_det[:,d] = 2*SP.dot(URU,SS.T)
+            # calculate gradient of squared form
+            LMLgrad_quad[:,d] = -2*(tmp*Kd_grad).sum(0)
+
+        LMLgrad = 0.5*(LMLgrad_det + LMLgrad_quad)
+
+        if self.debugging:
+            _LMLgrad = SP.zeros((self.t,self.gplvm_dimensions_sigma))
+            for t in xrange(self.t):
+                for d in xrange(self.gplvm_dimensions_sigma):
+                    Kgrad_x = self.covar_sigma.Kgrad_x(hyperparams['covar_sigma'],self.X_sigma,t,d)
+                    Kgrad_x = SP.kron(Kgrad_x,KV['K_omega'])
+                    _LMLgrad[t,d] = 0.5*(KV['W']*Kgrad_x).sum()
+
+            assert SP.allclose(LMLgrad,_LMLgrad,rtol=1E-3,atol=1E-2), 'ouch, something is wrong: %.2f'%LA.norm(LMLgrad-_LMLgrad)
+
+        return {'X_sigma': LMLgrad}
+
+    def _LMLgrad_x_omega(self,hyperparams):
+        try:
+            KV = self.get_covariances(hyperparams)
+        except LA.LinAlgError:
+            LG.error('linalg exception in _LMLgrad_x_omega')
+            return {'X_omega':SP.zeros(hyperparams['X_omega'].shape)}
+
+        LMLgrad = SP.zeros((self.n,self.gplvm_dimensions_omega))
+        LMLgrad_det = SP.zeros((self.n,self.gplvm_dimensions_omega))
+        LMLgrad_quad = SP.zeros((self.n,self.gplvm_dimensions_omega))
+
+        S = SP.kron(KV['Stilde_sigma'],KV['Stilde_omega'])+1
+        SS = SP.dot(unravel(1./S,self.n,self.t),SP.diag(KV['USUsigmaUSU']))
+        SiYtilde = (1./S) * ravel(KV['Ytilde_os'])
+        USUSiYtilde = SP.dot(KV['UrSrIUtildeOmega'],unravel(SiYtilde,self.n,self.t))
+        tmp = SP.dot(USUSiYtilde,SP.dot(KV['USUsigmaUSU'],USUSiYtilde.T))
+
+        for d in xrange(self.gplvm_dimensions_omega):
+            Kd_grad = self.covar_omega.Kgrad_x(hyperparams['covar_omega'],self.X_omega,None,d)
+            # calculate gradient of logdet
+            URU = SP.dot(Kd_grad.T,KV['UrSrIUtildeOmega'])*KV['UrSrIUtildeOmega']
+            LMLgrad_det[:,d] = 2*SP.dot(URU,SS.T)
+            # calculate gradient of squared form
+            LMLgrad_quad[:,d] = -2*(tmp*Kd_grad).sum(0)
+
+        LMLgrad = 0.5*(LMLgrad_det + LMLgrad_quad)
+
+        if self.debugging:
+            _LMLgrad = SP.zeros((self.n,self.gplvm_dimensions_omega))
+            for n in xrange(self.n):
+                for d in xrange(self.gplvm_dimensions_omega):
+                    Kgrad_x = self.covar_omega.Kgrad_x(hyperparams['covar_omega'],self.X_omega,n,d)
+                    Kgrad_x = SP.kron(KV['K_sigma'],Kgrad_x)
+                    _LMLgrad[n,d] = 0.5*(KV['W']*Kgrad_x).sum()
+            assert SP.allclose(LMLgrad,_LMLgrad,rtol=1E-3,atol=1E-2), 'ouch, something is wrong: %.2f'%LA.norm(LMLgrad-_LMLgrad)
+
+        return {'X_omega': LMLgrad}
+
+
+    def _LMLgrad_covar_r(self,hyperparams):
+        """
+        evaluates the gradient of the log marginal likelihood with respect to the hyperparameters of covar_r
+        """
+        try:
+            KV = self.get_covariances(hyperparams)
+        except LA.LinAlgError:
+            LG.error('linalg exception in _LMLgrad_covar_r')
+            return {'covar_r':SP.zeros(hyperparams['covar_r'].shape)}
+
+        theta = SP.zeros(len(hyperparams['covar_r']))
+        S = SP.kron(KV['Stilde_c'],KV['Stilde_r'])+1
+        SiYtilde = (1./S) * ravel(KV['Ytilde_rc'])
+        SiYUSUCUSU = SP.dot(unravel(SiYtilde,self.n,self.t),KV['USUCUSU'])
+        Si = 1./S
+
+        for i in range(len(theta)):
+            Kgrad_r = self.covar_r.Kgrad_theta(hyperparams['covar_r'],self.X_r,i)
+            USURUSU = SP.dot(KV['UomegaSomegaIUtildeR'].T,SP.dot(Kgrad_r,KV['UomegaSomegaIUtildeR']))
+            LMLgrad_det = (Si * SP.kron(SP.diag(KV['USUCUSU']),SP.diag(USURUSU))).sum()
+            LMLgrad_quad = -(SiYtilde*ravel(SP.dot(USURUSU,SiYUSUCUSU))).sum()
+            LMLgrad = 0.5*(LMLgrad_det + LMLgrad_quad)
+            theta[i] = LMLgrad
+
+            if self.debugging:
+                Kd = SP.kron(KV['K_c'],Kgrad_r)
+                _LMLgrad = 0.5 * (KV['W']*Kd).sum()
+                assert SP.allclose(LMLgrad,_LMLgrad,rtol=1E-2,atol=1E-2), 'ouch, something is wrong: %.2f'%LA.norm(LMLgrad-_LMLgrad)
+
+        return {'covar_r':theta}
+
+    def _LMLgrad_covar_c(self,hyperparams):
+        """
+        evaluates the gradient of the log marginal likelihood with respect to the hyperparameters of covar_c
+        """
+        try:
+            KV = self.get_covariances(hyperparams)
+        except LA.LinAlgError:
+            LG.error('linalg exception in _LMLgrad_covar_c')
+            return {'covar_c':SP.zeros(hyperparams['covar_c'].shape)}
+
+        theta = SP.zeros(len(hyperparams['covar_c']))
+        S = SP.kron(KV['Stilde_c'],KV['Stilde_r'])+1
+        SiYtilde = (1./S) * ravel(KV['Ytilde_rc'])
+        USURUSUSiY = SP.dot(KV['USURUSU'],unravel(SiYtilde,self.n,self.t))
+        Si = 1./S
+
+        for i in range(len(theta)):
+            Kgrad_c = self.covar_c.Kgrad_theta(hyperparams['covar_c'],self.X_c,i)
+            USUCUSU = SP.dot( KV['UsigmaSsigmaIUtildeC'].T,SP.dot(Kgrad_c, KV['UsigmaSsigmaIUtildeC']))
+            LMLgrad_det = (Si * SP.kron(SP.diag(USUCUSU),SP.diag(KV['USURUSU']))).sum()
+            LMLgrad_quad = -(SiYtilde*ravel(SP.dot(USURUSUSiY,USUCUSU))).sum()
+            LMLgrad = 0.5*(LMLgrad_det + LMLgrad_quad)
+            theta[i] = LMLgrad
+
+            if self.debugging:
+                Kd = SP.kron(Kgrad_c,KV['K_r'])
+                _LMLgrad = 0.5 * (KV['W']*Kd).sum()
+                assert SP.allclose(LMLgrad,_LMLgrad,rtol=1E-3,atol=1E-2), 'ouch, something is wrong: %.2f'%LA.norm(LMLgrad-_LMLgrad)
+
+        return {'covar_c':theta}
+
+    def _LMLgrad_covar_omega(self,hyperparams):
+        """
+        evaluates the gradient of the log marginal likelihood with respect to the hyperparameters of covar_omega
+        """
+        try:
+            KV = self.get_covariances(hyperparams)
+        except LA.LinAlgError:
+            LG.error('linalg exception in _LMgradL_covar_omega')
+            return {'covar_omega':SP.zeros(hyperparams['covar_omega'].shape)}
+
+        theta = SP.zeros(len(hyperparams['covar_omega']))
+        S = SP.kron(KV['Stilde_sigma'],KV['Stilde_omega'])+1
+        SiYtilde = (1./S) * ravel(KV['Ytilde_os'])
+        SiYUSUsigmaUSU = SP.dot(unravel(SiYtilde,self.n,self.t),KV['USUsigmaUSU'])
+        Si = 1./S
+
+        for i in range(len(theta)):
+            Kgrad_omega = self.covar_omega.Kgrad_theta(hyperparams['covar_omega'],self.X_omega,i)
+            USUomegaUSU = SP.dot(KV['UrSrIUtildeOmega'].T,SP.dot(Kgrad_omega,KV['UrSrIUtildeOmega']))
+            LMLgrad_det = (Si * SP.kron(SP.diag(KV['USUsigmaUSU']),SP.diag(USUomegaUSU))).sum()
+            LMLgrad_quad = -(SiYtilde*ravel(SP.dot(USUomegaUSU,SiYUSUsigmaUSU))).sum()
+            LMLgrad = 0.5*(LMLgrad_det + LMLgrad_quad)
+            theta[i] = LMLgrad
+
+            if self.debugging:
+                Kd = SP.kron(KV['K_sigma'], Kgrad_omega)
+                _LMLgrad = 0.5 * (KV['W']*Kd).sum()
+                assert SP.allclose(LMLgrad,_LMLgrad,rtol=1E-2,atol=1E-2), 'ouch, something is wrong: %.2f'%LA.norm(LMLgrad-_LMLgrad)
+
+        return {'covar_omega':theta}
+
+    def _LMLgrad_covar_sigma(self,hyperparams):
+        """
+        evaluates the gradient of the log marginal likelihood with respect to the hyperparameters of covar_sigma
+        """
+        try:
+            KV = self.get_covariances(hyperparams)
+        except LA.LinAlgError:
+            LG.error('linalg exception in _LMLgrad_covar_sigma')
+            return {'covar_sigma':SP.zeros(hyperparams['covar_sigma'].shape)}
+
+        theta = SP.zeros(len(hyperparams['covar_sigma']))
+        S = SP.kron(KV['Stilde_sigma'],KV['Stilde_omega'])+1
+        SiYtilde = (1./S) * ravel(KV['Ytilde_os'])
+        USUOmegaUSUSiY = SP.dot(KV['USUomegaUSU'],unravel(SiYtilde,self.n,self.t))
+        Si = 1./S
+
+        for i in range(len(theta)):
+            Kgrad_sigma = self.covar_sigma.Kgrad_theta(hyperparams['covar_sigma'],self.X_sigma,i)
+            USUsigmaUSU = SP.dot(KV['UcScIUtildeSigma'].T,SP.dot(Kgrad_sigma,KV['UcScIUtildeSigma']))
+            LMLgrad_det = (Si * SP.kron(SP.diag(USUsigmaUSU),SP.diag(KV['USUomegaUSU']))).sum()
+            LMLgrad_quad = -(SiYtilde*ravel(SP.dot(USUOmegaUSUSiY,USUsigmaUSU))).sum()
+            LMLgrad = 0.5*(LMLgrad_det + LMLgrad_quad)
+            theta[i] = LMLgrad
+
+            if self.debugging:
+                Kd = SP.kron(Kgrad_sigma, KV['K_omega'])
+                _LMLgrad = 0.5 * (KV['W']*Kd).sum()
+                assert SP.allclose(LMLgrad,_LMLgrad,rtol=1E-3,atol=1E-2), 'ouch, something is wrong: %.2f'%LA.norm(LMLgrad-_LMLgrad)
+
+        return {'covar_sigma':theta}

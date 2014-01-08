@@ -1,0 +1,76 @@
+import scipy as SP
+import pdb
+import matplotlib.pylab as PLT
+import scipy.linalg as LA
+
+import sys
+sys.path.append('../glasso')
+
+import glasso
+import kpglasso
+
+import logging as LG
+
+def simPrecision(p,N):
+    """
+    simulate sparse precision matrix
+
+    p: probabilty that an entry is non-zero
+    N: dimension of the matrix
+    """
+    Sinv = SP.diag(SP.ones(N))
+    n_active = 0.05*N**2
+    idx = SP.random.permutation(N**2)[:n_active]
+    Sinv.flat[idx] = 1
+    Sinv = Sinv + Sinv.T
+    EVsmallest = (LA.eigh(Sinv,eigvals_only=True)).min()
+    if EVsmallest<0:
+        Sinv += 1.1*SP.absolute(EVsmallest)*SP.eye(N)
+    return Sinv
+
+if __name__ == '__main__':
+    LG.basicConfig(level=LG.INFO)
+    
+    # simulate data
+    n_c = 10 # dimension of column variance
+    n_r = 25 # dimension of row covariance
+    D = 50 # number of repetitions
+    
+    # generate a sparse positive definitie inverse covariance matrix
+    SP.random.seed(1)
+    Cinv = simPrecision(0.05,n_c)
+    Rinv = simPrecision(0.05,n_r)
+    C = LA.inv(Cinv)
+    R = LA.inv(Rinv)
+
+    S = SP.kron(C,R)
+    Sinv = SP.kron(Cinv,Rinv)
+    N = S.shape[0]
+    Y = SP.random.multivariate_normal(SP.zeros(N),S,D).T
+
+    S = SP.cov(Y)
+    A = kpglasso.mappingA(C,S)
+    assert SP.allclose(1./n_c*SP.trace(SP.dot(SP.kron(C,R),S)),SP.trace(SP.dot(A,R))), 'ouch, something is wrong...'
+    B = kpglasso.mappingB(R,S)
+    assert SP.allclose(1./n_r*SP.trace(SP.dot(SP.kron(C,R),S)),SP.trace(SP.dot(B,C))), 'ouch, something is wrong...'
+
+    gLassoKron = kpglasso.KpGPLasso()
+    gLassoKron.setData(Y,n_c,n_r)
+    CinvEst,RinvEst = gLassoKron.train()
+
+    gLasso = glasso.GLasso()
+    gLasso.setData(Y)
+    SinvEst = gLasso.train()
+    
+
+    fig = PLT.figure(figsize=(9,4.5))
+    fig.add_subplot(131)
+    PLT.imshow(Sinv,interpolation='nearest')
+    PLT.title('Sinv')
+    fig.add_subplot(132)
+    PLT.imshow(SinvEst,interpolation='nearest')
+    PLT.title('GLasso-Estimator')
+    fig.add_subplot(133)
+    PLT.imshow(SP.kron(CinvEst,RinvEst),interpolation='nearest')
+    PLT.title('KP_GLasso-Estimator')
+    pdb.set_trace()

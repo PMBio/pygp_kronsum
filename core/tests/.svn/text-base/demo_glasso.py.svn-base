@@ -1,0 +1,46 @@
+import scipy as SP
+import pdb
+import matplotlib.pylab as PLT
+import scipy.linalg as LA
+
+import sys
+sys.path.append('../glasso')
+import glasso
+
+import logging as LG
+
+if __name__ == '__main__':
+    LG.basicConfig(level=LG.DEBUG)
+
+    pdb.set_trace()
+    
+    # simulate data
+    N = 100 # number of features
+    D = 1000 # number of samples
+
+    # generate a sparse positive definitie inverse covariance matrix
+    SP.random.seed(1)
+    Sinv = SP.diag(SP.ones(N))
+    n_active = 0.001*N**2
+    idx = SP.random.permutation(N**2)[:n_active]
+    Sinv.flat[idx] = 1
+    Sinv = Sinv + Sinv.T
+    EVsmallest = LA.eigh(Sinv,eigvals_only=True).min()
+    if EVsmallest<0:
+        Sinv += 1.1*SP.absolute(EVsmallest)*SP.eye(N)
+    S = LA.inv(Sinv)
+    Y = SP.random.multivariate_normal(SP.zeros(N),S,D).T
+
+    gLasso = glasso.GLasso()
+    gLasso.setData(Y)
+    SinvEst = gLasso.train()
+
+    fig = PLT.figure(figsize=(9,4.5))
+    fig.add_subplot(121)
+    PLT.imshow(Sinv,interpolation='nearest')
+    PLT.title('Sinv')
+    fig.add_subplot(122)
+    PLT.imshow(SinvEst,interpolation='nearest')
+    PLT.title('GLasso-Estimator')
+
+    pdb.set_trace()

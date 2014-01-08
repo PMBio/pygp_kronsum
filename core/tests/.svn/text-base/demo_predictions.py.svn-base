@@ -1,0 +1,162 @@
+import scipy as SP
+import pdb
+import matplotlib.pylab as PLT
+
+import sys
+sys.path.append('../gp')
+import gp_base, kronsum_gp,kronprod_gp
+sys.path.append('../covariance')
+import linear, fixed
+sys.path.append('../likelihood')
+import likelihood_base as lik
+sys.path.append('../optimize')
+import optimize_base as opt
+
+import logging as LG
+sys.path.append('../gp')
+from kronprod_gp import ravel,unravel
+
+sys.path.append('../experiments')
+from utils import getVariance
+
+from sim_data import sim_linear_kernel,sim_pheno
+
+
+def run_experiment(D,N,h2,nfolds=10):
+    """
+    run experiment
+
+    D: number of phenotypes
+    N: number of samples
+    h2: heritability
+    nfolds: number of folds for cross-validation
+    """
+    # simulate data
+    Kc = 1
+    C,X_c = sim_linear_kernel(N=D,n_dim=Kc) # low rank genetic correlation
+    Kr = N
+    R,X_r = sim_linear_kernel(N=N,n_dim=Kr) # population kernel
+    Ksigma = 1
+    Sigma,X_sigma = sim_linear_kernel(N=D,n_dim=Ksigma) # low rank noise correlation
+    Omega = SP.eye(N) # iid noise
+    K = SP.kron(C,R) 
+    scaling = h2/getVariance(K)
+    X_r *= SP.sqrt(scaling)
+    R   *= scaling
+    Knoise = SP.kron(Sigma,Omega)
+    scaling = (1-h2)/getVariance(Knoise)
+    Omega *= scaling
+    Yvec = sim_pheno(C,R,Sigma,Omega)
+    Y = unravel(Yvec,N,D)
+    r = SP.random.permutation(N)
+    Icv=SP.floor(((SP.ones((N))*nfolds)*r)/N)
+
+    opts = {}
+    opts['gradcheck'] = False
+    
+    # standard GP prediction
+    Y_gp = SP.zeros(Y.shape)
+    covariance = linear.LinearCF(n_dimensions=Kr)
+    likelihood = lik.GaussLikISO()
+    gp = gp_base.GP(covar_func=covariance,likelihood=likelihood)
+    for j in range(D):
+        # get hyperparams
+        hyperparams = {'covar': SP.log([1])}
+        hyperparams['lik'] = SP.log([1])
+        for i in range(nfolds):
+            Itrain = Icv!=i
+            Itest = Icv==i
+            y = SP.reshape(Y[:,j],(N,1))
+            gp.setData(X=X_r[Itrain],Y=y[Itrain])
+            [hyperparams_opt, lml_opt] = opt.opt_hyper(gp,hyperparams,opts=opts)
+            Y_gp[Itest,j] = gp.predict(hyperparams_opt,X_r[Itest])
+
+    # Kronecker Product Prediction
+    Y_kronprod = SP.zeros(Y.shape)
+    likelihood = lik.GaussLikISO()
+    covar_c = linear.LinearCF(n_dimensions=Kc)
+    covar_r = linear.LinearCF(n_dimensions=Kr)
+    hyperparams = {}
+    hyperparams['covar_c'] = SP.log([1])
+    hyperparams['covar_r'] = SP.log([1])
+    hyperparams['lik'] = SP.log([1])
+    kgp = kronprod_gp.KronProdGP(covar_r=covar_r,covar_c=covar_c,likelihood=likelihood)
+    #kgp.setDebugging(True)
+    
+    for i in range(nfolds):
+        Itrain = Icv!=i
+        Itest = Icv==i
+        kgp.setData(X_c=X_c,X_r=X_r[Itrain],Y=Y[Itrain],gplvm_dimensions_c=Kc,gplvm_dimensions_r=Kr)
+        [hyperparams_opt, lml_opt] = opt.opt_hyper(kgp,hyperparams,opts=opts)
+        Y_kronprod[Itest,:] = kgp.predict(hyperparams_opt,X_c,X_r[Itest])
+
+    Y_kronsum = SP.zeros(Y.shape)
+    covar_r = linear.LinearCF(n_dimensions=Kr)
+    covar_c = linear.LinearCF(n_dimensions=Kc)
+    covar_sigma = linear.LinearCF(n_dimensions=Ksigma)
+    hyperparams = {}
+    hyperparams['covar_c'] = SP.log([1])
+    hyperparams['covar_r'] = SP.log([1])
+    hyperparams['covar_sigma'] = SP.log([1])
+    hyperparams['covar_omega'] = SP.log([1])
+    for i in range(nfolds):
+        Itrain = Icv!=i
+        Itest = Icv==i
+        covar_omega = fixed.FixedCF(Omega[Itrain][:,Itrain])
+        kgp = kronsum_gp.KronSumGP(covar_r=covar_r,covar_c=covar_c,covar_sigma=covar_sigma,covar_omega=covar_omega,likelihood=None)
+        #kgp.setDebugging(True)
+        kgp.setData(X_r=X_r[Itrain],X_c=X_c,X_sigma=X_sigma,Y=Y[Itrain],gplvm_dimensions_sigma=Ksigma,gplvm_dimensions_c=Kc)
+        [hyperparams_opt, lml_opt] = opt.opt_hyper(kgp,hyperparams,opts=opts)
+        Y_kronsum[Itest,:] = kgp.predict(hyperparams_opt,X_c,X_r[Itest])
+
+    corr = {}
+    corr['GPbase'] = SP.corrcoef(Y.flatten(),Y_gp.flatten())[0,1]**2
+    corr['GPkronprod'] = SP.corrcoef(Y.flatten(),Y_kronprod.flatten())[0,1]**2
+    corr['GPkronsum'] = SP.corrcoef(Y.flatten(),Y_kronsum.flatten())[0,1]**2
+
+    return corr
+
+
+if __name__ == '__main__':
+    # test if multitask setting is beneficial for predicting
+    # parameters are not learnt!
+    SP.random.seed(1)
+
+    N = 100 # number of samples
+    D = 5 # number of phenotypes
+    n_reps = 20 # number of repetitions
+    nfolds = 10 # folds for cross-validation
+
+    h2 = SP.array([0.001,0.1,.2,.3,.4,.5,.6,.7,.8,.9,.9999])
+    corr = {}
+    corr['GPbase'] = SP.zeros((len(h2),n_reps))
+    corr['GPkronprod'] = SP.zeros((len(h2),n_reps))
+    corr['GPkronsum'] = SP.zeros((len(h2),n_reps))
+
+    for i in range(len(h2)):
+        print 'heritability: %.3f'%h2[i]
+        for j in range(n_reps):
+            print '... repetition: %d'%j
+            _corr = run_experiment(D,N,h2[i])
+            corr['GPbase'][i,j] = _corr['GPbase']
+            corr['GPkronprod'][i,j] = _corr['GPkronprod']
+            corr['GPkronsum'][i,j] = _corr['GPkronsum']
+        print 'GPbase: %.2f'%corr['GPbase'][i].mean()
+        print 'GPkronprod: %.2f'%corr['GPkronprod'][i].mean()
+        print 'GPkronsum: %.2f'%corr['GPkronsum'][i].mean()
+        
+    # plot R2 on predicted data as a function of heritability
+    idx = SP.arange(len(h2))
+    width = 0.25
+    fig = PLT.figure()
+    ax = fig.add_subplot(111)
+    rects1=ax.bar(idx,corr['GPbase'].mean(1),width=width,color='r',yerr=corr['GPbase'].std(1)/SP.sqrt(n_reps),ecolor='k')
+    rects2=ax.bar(idx+width,corr['GPkronprod'].mean(1),width=width,color='b',yerr=corr['GPkronprod'].std(1)/SP.sqrt(n_reps),ecolor='k')
+    rects3=ax.bar(idx+2*width,corr['GPkronsum'].mean(1),width=width,color='g',yerr=corr['GPkronsum'].std(1)/SP.sqrt(n_reps),ecolor='k')
+    ax.set_ylabel('Squared Correlation Coefficient on Unseen Data')
+    ax.set_xlabel('Heritability')
+    ax.set_xticks(idx+width)
+    ax.set_xticklabels(h2)
+    ax.legend( (rects1[0],rects2[0],rects3[0]), ('GPbase','GPkronprod','GPkronsum'),loc=2)
+
+    pdb.set_trace()

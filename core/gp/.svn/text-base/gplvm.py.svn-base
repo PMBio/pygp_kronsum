@@ -1,0 +1,104 @@
+import pdb
+import numpy as NP
+import scipy as SP
+import scipy.linalg as LINALG
+
+from gp_base import GP
+
+
+def PCA(Y,n_factors):
+    """
+    run standard PCA: Y = WX + noise
+
+    input:
+    Y: [N,D] data matrix
+
+    output:
+    X: latent variables [D,K]
+    W: weights [N,K]
+    """
+    # run singular value decomposition
+    U,S,Vt = LINALG.svd(Y,full_matrices=True)
+    U = U[:,:n_factors]
+    S = SP.diag(S[:n_factors])
+    US = SP.dot(U,S)
+    Vt = Vt[:n_factors,:].T
+    # normalize weights
+    s = U.std(axis=0)
+    US = US/s
+    Vt = (Vt*s)
+    return US,Vt
+
+class GPLVM(GP):
+    
+    def setData(self,gplvm_dimensions=None,**kw_args):
+        self.gplvm_dimensions = gplvm_dimensions
+        super(GPLVM,self).setData(**kw_args)
+
+    def LML(self,hyperparams,*kw_args):
+        """
+        calculate the log marginal likelihood for the given logtheta
+
+        Input:
+        hyperparams: dictionary
+        priors:      prior beliefs for the hyperparameter
+        """
+        self._update_inputs(hyperparams)
+        LML = self._LML_covar(hyperparams)
+        #pdb.set_trace()
+        return LML
+
+    def LMLgrad(self,hyperparams,**kw_args):
+        """
+        evaludates the gradient of the log marginal likelihood
+        Input:
+        hyperparams: dictionary
+        priors:      prior beliefs for the hyperparameter
+        """
+        self._update_inputs(hyperparams)
+        RV = {}
+        # gradient with respect to hyperparameters
+        RV.update(self._LMLgrad_covar(hyperparams))
+        # gradient with respect to noise parameters
+        if self.likelihood is not None:
+            RV.update(self._LMLgrad_lik(hyperparams))
+        # gradient with respect to X
+        RV.update(self._LMLgrad_x(hyperparams))
+        return RV
+
+    def _LMLgrad_x(self,hyperparams):
+        """
+        evaluates the gradient of the log marginal likelihood with
+        respect to the latent variables
+        """
+        try:
+            KV = self.get_covariances(hyperparams)
+        except LA.LinAlgError:
+            LG.error('linalg exception in _LML_grad_x')
+            return {'X': SP.zeros(hyperparams['X'].shape)}
+        except LA.LinAlgError:
+            LG.error('linalg exception in _LML_grad_x')
+            return {'X': SP.zeros(hyperparams['X'].shape)}
+  
+        W = KV['W']
+        LMLgrad = SP.zeros((self.n,self.d))
+        for d in xrange(self.d):
+            Kd_grad = self.covar.Kgrad_x(hyperparams['covar'],self.X,None,d)
+            LMLgrad[:,d] = SP.sum(W*Kd_grad,axis=0)
+
+        if self.debugging:
+            # compare to explicit solution
+            LMLgrad2 = SP.zeros((self.n,self.d))
+            for n in xrange(self.n):
+                for d in xrange(self.d):
+                    Knd_grad = self.covar.Kgrad_x(hyperparams['covar'],self.X,n,d)
+                    LMLgrad2[n,d] = 0.5*(W*Knd_grad).sum()
+            assert SP.allclose(LMLgrad,LMLgrad2), 'ouch, something is wrong'
+        
+        return {'X':LMLgrad}
+
+    def _update_inputs(self,hyperparams):
+        """ update the inputs from gplvm model """
+        if 'X' in hyperparams:
+            self.X = hyperparams['X']
+        

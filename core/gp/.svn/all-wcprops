@@ -1,0 +1,35 @@
+K 25
+svn:wc:ra_dav:version-url
+V 38
+/svn/kroneckersum/!svn/ver/120/code/gp
+END
+gp_base.py
+K 25
+svn:wc:ra_dav:version-url
+V 48
+/svn/kroneckersum/!svn/ver/76/code/gp/gp_base.py
+END
+kronprod_gp.py
+K 25
+svn:wc:ra_dav:version-url
+V 52
+/svn/kroneckersum/!svn/ver/76/code/gp/kronprod_gp.py
+END
+kronsum_gp.py
+K 25
+svn:wc:ra_dav:version-url
+V 52
+/svn/kroneckersum/!svn/ver/116/code/gp/kronsum_gp.py
+END
+gplvm.py
+K 25
+svn:wc:ra_dav:version-url
+V 46
+/svn/kroneckersum/!svn/ver/53/code/gp/gplvm.py
+END
+kronsum_gp_naive.py
+K 25
+svn:wc:ra_dav:version-url
+V 58
+/svn/kroneckersum/!svn/ver/120/code/gp/kronsum_gp_naive.py
+END

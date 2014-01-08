@@ -1,0 +1,90 @@
+import scipy as SP
+import pdb
+import matplotlib.pylab as PLT
+import scipy.optimize as OPT
+
+import sys
+sys.path.append('../gp')
+import gp_base
+sys.path.append('../covariance')
+import linear,fixed,diag
+sys.path.append('../likelihood')
+import likelihood_base as lik
+sys.path.append('../optimize')
+import optimize_base as opt
+sys.path.append('../experiments')
+import sim_data
+import logging as LG
+import utils
+import pdb
+
+if __name__ == '__main__':
+    #1. simulate data according to model
+    SP.random.seed(1)
+
+    N=200
+    n_dim = 10
+    
+    if 1:
+        print 'test linear kernel'
+        # linear kernel
+        K,X = sim_data.sim_linear_kernel(N=N,n_dim=n_dim)
+        scale = utils.getVariance(K)
+        K /= scale
+        X /= SP.sqrt(utils.getVariance(SP.dot(X,X.T)))
+        covar = linear.LinearCF(n_dimensions=n_dim)
+        likelihood = lik.GaussLikISO()
+        Y = SP.random.multivariate_normal(SP.zeros(K.shape[0]),K+SP.eye(N))
+        Y = SP.reshape(Y,(Y.shape[0],1))
+        gp = gp_base.GP(covar_func=covar,likelihood=likelihood)
+        hyperparams = {}
+        hyperparams['covar'] = SP.log([0.5])
+        hyperparams['lik'] = SP.log([0.1])
+        gp.setData(X=X,Y=Y)
+        gp.LML(hyperparams)
+        gp.LMLgrad(hyperparams)
+        [hyperparams_opt,lml_opt] = opt.opt_hyper(gp,hyperparams,opts=[])
+        print gp.LMLgrad(hyperparams_opt)
+        print hyperparams_opt
+
+    if 1:
+        print 'test fixed kernel'
+        # fixed kernel
+        K,X = sim_data.sim_linear_kernel(N=N,n_dim=n_dim)
+        scale = utils.getVariance(K)
+        K /= scale
+        Y = SP.random.multivariate_normal(SP.zeros(K.shape[0]),K + SP.eye(N))
+        Y = SP.reshape(Y,(Y.shape[0],1))
+        covar = fixed.FixedCF(K,n_dimensions=n_dim)
+        likelihood = lik.GaussLikISO()
+        gp = gp_base.GP(covar_func=covar,likelihood=likelihood)
+        hyperparams = {}
+        hyperparams['covar'] = SP.log([0.5])
+        hyperparams['lik'] = SP.log([0.1])
+        gp.setData(X=X,Y=Y)
+        gp.LML(hyperparams)
+        gp.LMLgrad(hyperparams)
+        [hyperparams_opt,lml_opt] = opt.opt_hyper(gp,hyperparams,opts=[])
+        print gp.LMLgrad(hyperparams_opt)
+        print hyperparams_opt
+     
+    if 1:
+        print 'diagonal kernel'
+        # diagonal kernel - makes not much sense if not used in multitask setting
+        K = SP.eye(N)
+        Y = SP.random.randn(N)
+        X = SP.random.randn(N,n_dim)
+        Y = SP.reshape(Y,(Y.shape[0],1))
+        likelihood = None
+        covar = diag.DiagIsoCF(n_dimensions=n_dim)
+        hyperparams = {}
+        hyperparams['covar'] = SP.log([0.5])
+        
+        gp = gp_base.GP(covar_func=covar,likelihood=likelihood)
+        gp.setData(X=X,Y=Y)
+        gp.LML(hyperparams)
+        gp.LMLgrad(hyperparams)
+        [hyperparams_opt,lml_opt] = opt.opt_hyper(gp,hyperparams,opts=[])
+        print gp.LMLgrad(hyperparams_opt)
+        print hyperparams_opt
+        

@@ -1,0 +1,41 @@
+K 25
+svn:wc:ra_dav:version-url
+V 45
+/svn/kroneckersum/!svn/ver/77/code/covariance
+END
+linear.py
+K 25
+svn:wc:ra_dav:version-url
+V 55
+/svn/kroneckersum/!svn/ver/77/code/covariance/linear.py
+END
+lowrank.py
+K 25
+svn:wc:ra_dav:version-url
+V 56
+/svn/kroneckersum/!svn/ver/61/code/covariance/lowrank.py
+END
+fixed.py
+K 25
+svn:wc:ra_dav:version-url
+V 54
+/svn/kroneckersum/!svn/ver/77/code/covariance/fixed.py
+END
+covar_base.py
+K 25
+svn:wc:ra_dav:version-url
+V 59
+/svn/kroneckersum/!svn/ver/49/code/covariance/covar_base.py
+END
+diag.py
+K 25
+svn:wc:ra_dav:version-url
+V 53
+/svn/kroneckersum/!svn/ver/51/code/covariance/diag.py
+END
+se.py
+K 25
+svn:wc:ra_dav:version-url
+V 51
+/svn/kroneckersum/!svn/ver/49/code/covariance/se.py
+END
