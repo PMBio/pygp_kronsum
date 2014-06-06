@@ -18,6 +18,7 @@ import core.covariance.diag as diag
 import core.optimize.optimize_base as optimize_base
 import core.priors.priors as prior
 import experiments.initialize as initialize
+from core.data_term import IdentDT
 
 import matplotlib.pylab as PLT
 
@@ -39,14 +40,15 @@ if __name__ == "__main__":
     X_s = SP.random.randn(n_tasks,n_latent)
     X_r = SP.random.randn(n_train,n_dimensions)/SP.sqrt(n_dimensions)
     R = SP.dot(X_r,X_r.T)
-    C = SP.dot(X_c,X_c.T)
+    C = SP.dot(X_c,X_c.T) 
     Sigma = SP.dot(X_s,X_s.T)
     K = SP.kron(C,R) + SP.kron(Sigma,SP.eye(n_train))
     y = SP.random.multivariate_normal(SP.zeros(n_tasks*n_train),K)
     Y = SP.reshape(y,(n_train,n_tasks),order='F')
+    Y = IdentDT(SP.reshape(y,(n_train,n_tasks),order='F'))
     
     # initialization parameters
-    hyperparams, Ifilter, bounds = initialize.init('GPkronsum_LIN',Y.T,X_r,{'n_c':n_latent, 'n_sigma':n_latent})
+    hyperparams, Ifilter, bounds = initialize.init('GPkronsum_LIN',Y.value().T,X_r,{'n_c':n_latent, 'n_sigma':n_latent})
     
     # initialize gp and its covariance functions
     covar_r.X = X_r

@@ -12,6 +12,7 @@ from core.linalg.linalg_matrix import jitChol
 import core.likelihood.likelihood_base as likelihood_base
 import collections
 from core.linalg.linalg_matrix import jitEigh
+from core.data_term import DataTerm
 
 class KronSumGP(GPLVM):
     """GPLVM for kronecker type covariance structures
@@ -33,12 +34,33 @@ class KronSumGP(GPLVM):
     def setPrior(self,prior):
         self.prior = None
 
+    # def setData(self,Y=None,X=None,X_r=None,X_o=None,**kwargs):
+    #     """
+    #     set data
+    #     Y:    Outputs [n x t]
+    #     """
+    #     assert Y.ndim==2, 'Y must be a two dimensional vector'
+    #     self.Y = Y
+    #     self.n = Y.shape[0]
+    #     self.t = Y.shape[1]
+    #     self.nt = self.n * self.t
+
+    #     if X_r!=None:
+    #         X = X_r
+    #     if X!=None:
+    #         self.covar_r.X = X
+    #     if X_o!=None:
+    #         self.covar_o.X = X_o
+        
+    #     self._invalidate_cache()
+
     def setData(self,Y=None,X=None,X_r=None,X_o=None,**kwargs):
         """
         set data
-        Y:    Outputs [n x t]
+        Y:   DataTerm representing outputs [n x t]
         """
-        assert Y.ndim==2, 'Y must be a two dimensional vector'
+        assert isinstance(Y, DataTerm)
+        
         self.Y = Y
         self.n = Y.shape[0]
         self.t = Y.shape[1]
@@ -155,15 +177,15 @@ class KronSumGP(GPLVM):
             KV['Ktilde_o'] = Ktilde_o; KV['Utilde_o'] = Utilde_o; KV['Stilde_o'] = Stilde_o
 
     
-        KV['UYtildeU_rc'] = SP.dot(KV['Utilde_r'].T,SP.dot(KV['USi_o'].T,SP.dot(self.Y,SP.dot(KV['USi_s'],KV['Utilde_c']))))
-        KV['UYtildeU_os'] = SP.dot(KV['Utilde_o'].T,SP.dot(KV['USi_r'].T,SP.dot(self.Y,SP.dot(KV['USi_c'],KV['Utilde_s']))))
+        KV['UYtildeU_rc'] = SP.dot(KV['Utilde_r'].T,SP.dot(KV['USi_o'].T,SP.dot(self.Y.value(),SP.dot(KV['USi_s'],KV['Utilde_c']))))
+        KV['UYtildeU_os'] = SP.dot(KV['Utilde_o'].T,SP.dot(KV['USi_r'].T,SP.dot(self.Y.value(),SP.dot(KV['USi_c'],KV['Utilde_s']))))
 
         KV['Stilde_rc'] = SP.kron(KV['Stilde_c'],KV['Stilde_r'])+1
         KV['Stilde_os'] = SP.kron(KV['Stilde_s'],KV['Stilde_o'])+1
         
         if debugging:
             # needed later
-            Yvec = ravel(self.Y)
+            Yvec = ravel(self.Y.value())
             K = SP.kron(KV['K_c'],KV['K_r']) + SP.kron(KV['K_s'],KV['K_o'])
             L = jitChol(K)[0].T # lower triangular
             alpha = LA.cho_solve((L,True),Yvec)
